@@ -490,7 +490,7 @@ class Emulator:
                 else:
                     address = self._calculate_tab_address(self.address, direction=1)
 
-                    if address < self.address:
+                    if not address or address < self.address:
                         address = 0
 
                     # GA23-0059-4 Pg 4-7:
