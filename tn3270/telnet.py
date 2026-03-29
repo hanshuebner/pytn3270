@@ -10,7 +10,8 @@ import time
 import logging
 import socket
 import selectors
-from telnetlib3 import IAC, WILL, WONT, DO, DONT, SB, SE, BINARY, EOR, TTYPE, TN3270E
+import ssl
+from telnetlib3 import IAC, WILL, WONT, DO, DONT, SB, SE, BINARY, EOR, TTYPE, TN3270E, TLS
 
 # https://tools.ietf.org/html/rfc855
 RFC855_EOR = b'\xef'
@@ -27,6 +28,9 @@ RFC2355_IS = b'\x04'
 RFC2355_REJECT = b'\x06'
 RFC2355_REQUEST = b'\x07'
 RFC2355_SEND = b'\x08'
+
+# https://tools.ietf.org/html/rfc2355 (STARTTLS)
+TLS_FOLLOWS = b'\x01'
 
 TN3270EMessageHeader = namedtuple('TN3270EMessageHeader', ['data_type', 'request_flag', 'response_flag', 'sequence_number'])
 
@@ -87,7 +91,7 @@ class Telnet:
         self.records = []
         self.device_names_stack = None
 
-    def open(self, host, port, device_names=None, tn3270_negotiation_timeout=None, ssl_context=None, ssl_server_hostname=None):
+    def open(self, host, port, device_names=None, tn3270_negotiation_timeout=None, ssl_context=None, ssl_server_hostname=None, starttls_ssl_context=None, starttls_server_hostname=None):
         """Open the connection."""
         self.close()
 
@@ -95,6 +99,8 @@ class Telnet:
 
         if ssl_context:
             self.socket = ssl_context.wrap_socket(self.socket, server_hostname=ssl_server_hostname)
+
+            self.logger.info('SSL/TLS connection established')
 
         self.socket_selector = selectors.DefaultSelector()
 
@@ -106,9 +112,13 @@ class Telnet:
         self.host_options = set()
         self.client_options = set()
         self.is_tn3270e_negotiated = False
+        self.is_tls_negotiated = False
         self.device_type = None
         self.device_name = None
         self.tn3270e_functions = set()
+
+        self.starttls_ssl_context = starttls_ssl_context
+        self.starttls_server_hostname = starttls_server_hostname
 
         self.buffer = bytearray()
         self.iac_buffer = bytearray()
@@ -304,6 +314,10 @@ class Telnet:
                 self.host_options.add(option)
 
                 self.socket.sendall(IAC + DO + option)
+            elif option == TLS and self.starttls_ssl_context is not None:
+                self.host_options.add(option)
+
+                self.socket.sendall(IAC + DO + option)
             else:
                 self.socket.sendall(IAC + DONT + option)
         elif command == WONT:
@@ -315,6 +329,10 @@ class Telnet:
                 self.client_options.add(option)
 
                 self.socket.sendall(IAC + WILL + option)
+            elif option == TLS and self.starttls_ssl_context is not None:
+                self.client_options.add(option)
+
+                self.socket.sendall(IAC + WILL + option)
             else:
                 self.socket.sendall(IAC + WONT + option)
         elif command == DONT:
@@ -322,7 +340,32 @@ class Telnet:
 
             self.socket.sendall(IAC + WONT + option)
 
+    def _start_tls(self):
+        self.logger.debug('Initiating STARTTLS')
+
+        # Send SB TLS FOLLOWS SE
+        self.socket.sendall(IAC + SB + TLS + TLS_FOLLOWS + IAC + SE)
+
+        # Upgrade the socket to TLS
+        self.socket_selector.unregister(self.socket)
+
+        self.socket = self.starttls_ssl_context.wrap_socket(
+            self.socket, server_hostname=self.starttls_server_hostname)
+
+        self.socket_selector.register(self.socket, selectors.EVENT_READ)
+
+        self.is_tls_negotiated = True
+
+        self.logger.info('STARTTLS negotiated')
+
     def _handle_subnegotiation(self, bytes_):
+        if bytes_ == TLS + TLS_FOLLOWS:
+            self.logger.debug('Received TLS FOLLOWS from server')
+
+            self._start_tls()
+
+            return
+
         if bytes_ == TTYPE + RFC1091_SEND:
             self.logger.debug('Received TTYPE SEND request')
 
