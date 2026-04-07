@@ -97,6 +97,8 @@ class Telnet:
 
         self.socket = socket.create_connection((host, port))
 
+        self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         if ssl_context:
             self.socket = ssl_context.wrap_socket(self.socket, server_hostname=ssl_server_hostname)
 
@@ -210,8 +212,11 @@ class Telnet:
         if self.eof:
             raise EOFError
 
-        if not self.socket_selector.select(timeout):
-            return
+        ssl_pending = isinstance(self.socket, ssl.SSLSocket) and self.socket.pending()
+
+        if not ssl_pending:
+            if not self.socket_selector.select(timeout):
+                return
 
         bytes_ = self.socket.recv(1024)
 
